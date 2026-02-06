@@ -7,7 +7,8 @@ from dotenv import load_dotenv
 from typing import AsyncGenerator, Optional
 import time
 
-from vllm import AsyncLLMEngine
+from vllm import AsyncLLMEngine, SamplingParams
+from vllm.utils import random_uuid
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
@@ -256,7 +257,23 @@ class OpenAIvLLMEngine(vLLMEngine):
         models = await self.serving_models.show_available_models()
         return models.model_dump()
     
+    def _is_qwen_omni_model(self):
+        """Check if the current model is a Qwen3-Omni variant."""
+        model_name = (self.engine_args.model or "").lower()
+        if os.getenv("ENABLE_QWEN_OMNI_AUDIO", "").lower() == "true":
+            return True
+        return "qwen3-omni" in model_name
+
     async def _handle_chat_or_completion_request(self, openai_request: JobInput):
+        # Route audio+text requests through custom Qwen-Omni preprocessing
+        if (openai_request.openai_route == "/v1/chat/completions"
+                and self._is_qwen_omni_model()):
+            from multimodal_processor import has_audio_content
+            if has_audio_content(openai_request.openai_input.get("messages", [])):
+                async for response in self._handle_audio_chat_request(openai_request):
+                    yield response
+                return
+
         if openai_request.openai_route == "/v1/chat/completions":
             request_class = ChatCompletionRequest
             generator_function = self.chat_engine.create_chat_completion
@@ -303,4 +320,170 @@ class OpenAIvLLMEngine(vLLMEngine):
                 if self.raw_openai_output:
                     batch = "".join(batch)
                 yield batch
-            
+
+    async def _handle_audio_chat_request(self, openai_request: JobInput):
+        """Handle chat completion with audio content using Qwen-Omni preprocessing."""
+        from multimodal_processor import build_vllm_inputs, get_processor
+
+        openai_input = openai_request.openai_input
+        messages = openai_input["messages"]
+        stream = openai_input.get("stream", False)
+
+        try:
+            processor = get_processor(self.engine_args.model)
+            inputs, limit_mm = build_vllm_inputs(messages, processor)
+        except Exception as e:
+            logging.error(f"Failed to build audio inputs: {e}")
+            yield create_error_response(f"Audio preprocessing failed: {e}").model_dump()
+            return
+
+        # Build sampling params from request
+        sp_kwargs = {}
+        max_tokens = openai_input.get("max_completion_tokens") or openai_input.get("max_tokens")
+        if max_tokens is not None:
+            sp_kwargs["max_tokens"] = max_tokens
+        if openai_input.get("temperature") is not None:
+            sp_kwargs["temperature"] = openai_input["temperature"]
+        if openai_input.get("top_p") is not None:
+            sp_kwargs["top_p"] = openai_input["top_p"]
+        if openai_input.get("n") is not None:
+            sp_kwargs["n"] = openai_input["n"]
+        if openai_input.get("stop") is not None:
+            sp_kwargs["stop"] = openai_input["stop"]
+        if openai_input.get("presence_penalty") is not None:
+            sp_kwargs["presence_penalty"] = openai_input["presence_penalty"]
+        if openai_input.get("frequency_penalty") is not None:
+            sp_kwargs["frequency_penalty"] = openai_input["frequency_penalty"]
+        if openai_input.get("seed") is not None:
+            sp_kwargs["seed"] = openai_input["seed"]
+
+        # Handle response_format -> guided decoding
+        response_format = openai_input.get("response_format")
+        if response_format:
+            try:
+                from vllm.sampling_params import GuidedDecodingParams
+                rf_type = response_format.get("type")
+                if rf_type == "json_schema":
+                    schema = response_format.get("json_schema", {}).get("schema")
+                    if schema:
+                        sp_kwargs["guided_decoding"] = GuidedDecodingParams(json=schema)
+                elif rf_type == "json_object":
+                    sp_kwargs["guided_decoding"] = GuidedDecodingParams(json_object=True)
+            except ImportError:
+                logging.warning("GuidedDecodingParams not available, response_format ignored")
+
+        sampling_params = SamplingParams(**sp_kwargs)
+        request_id = random_uuid()
+        created_time = int(time.time())
+
+        try:
+            results_generator = self.llm.generate(inputs, sampling_params, request_id)
+        except Exception as e:
+            logging.error(f"Failed to start audio generation: {e}")
+            yield create_error_response(f"Generation failed: {e}").model_dump()
+            return
+
+        if not stream:
+            # Non-streaming: collect all output then return full response
+            final_output = None
+            async for request_output in results_generator:
+                final_output = request_output
+
+            if final_output is None:
+                yield create_error_response("No output generated").model_dump()
+                return
+
+            choices = []
+            for output in final_output.outputs:
+                choices.append({
+                    "index": output.index,
+                    "message": {
+                        "role": "assistant",
+                        "content": output.text,
+                    },
+                    "finish_reason": output.finish_reason or "stop",
+                    "logprobs": None,
+                })
+
+            n_prompt_tokens = len(final_output.prompt_token_ids)
+            n_completion_tokens = sum(len(o.token_ids) for o in final_output.outputs)
+
+            yield {
+                "id": f"chatcmpl-{request_id}",
+                "object": "chat.completion",
+                "created": created_time,
+                "model": self.served_model_name,
+                "choices": choices,
+                "usage": {
+                    "prompt_tokens": n_prompt_tokens,
+                    "completion_tokens": n_completion_tokens,
+                    "total_tokens": n_prompt_tokens + n_completion_tokens,
+                },
+            }
+        else:
+            # Streaming: yield batched chunks
+            n_responses = openai_input.get("n", 1)
+            last_output_texts = ["" for _ in range(n_responses)]
+            batch = []
+            batch_token_counter = 0
+            batch_size = BatchSize(self.default_batch_size, self.min_batch_size, self.batch_size_growth_factor)
+
+            async for request_output in results_generator:
+                for output in request_output.outputs:
+                    new_text = output.text[len(last_output_texts[output.index]):]
+                    if new_text:
+                        chunk = {
+                            "id": f"chatcmpl-{request_id}",
+                            "object": "chat.completion.chunk",
+                            "created": created_time,
+                            "model": self.served_model_name,
+                            "choices": [{
+                                "index": output.index,
+                                "delta": {"content": new_text},
+                                "finish_reason": None,
+                            }],
+                        }
+                        if self.raw_openai_output:
+                            batch.append(f"data: {json.dumps(chunk)}\n\n")
+                        else:
+                            batch.append(chunk)
+                        batch_token_counter += 1
+
+                        if batch_token_counter >= batch_size.current_batch_size:
+                            if self.raw_openai_output:
+                                yield "".join(batch)
+                            else:
+                                yield batch
+                            batch = []
+                            batch_token_counter = 0
+                            batch_size.update()
+
+                    last_output_texts[output.index] = output.text
+
+            # Emit finish chunks
+            for i in range(n_responses):
+                finish_chunk = {
+                    "id": f"chatcmpl-{request_id}",
+                    "object": "chat.completion.chunk",
+                    "created": created_time,
+                    "model": self.served_model_name,
+                    "choices": [{
+                        "index": i,
+                        "delta": {},
+                        "finish_reason": "stop",
+                    }],
+                }
+                if self.raw_openai_output:
+                    batch.append(f"data: {json.dumps(finish_chunk)}\n\n")
+                else:
+                    batch.append(finish_chunk)
+                batch_token_counter += 1
+
+            if self.raw_openai_output:
+                batch.append("data: [DONE]\n\n")
+
+            if batch:
+                if self.raw_openai_output:
+                    yield "".join(batch)
+                else:
+                    yield batch

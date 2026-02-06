@@ -128,6 +128,12 @@ def get_engine_args():
         if os.getenv("MAX_PARALLEL_LOADING_WORKERS"):
             logging.warning("Overriding MAX_PARALLEL_LOADING_WORKERS with None because more than 1 GPU is available.")
     
+    # Default limit_mm_per_prompt for Qwen3-Omni models (audio support)
+    model_name = args.get("model", "").lower()
+    if "qwen3-omni" in model_name and "limit_mm_per_prompt" not in args:
+        args["limit_mm_per_prompt"] = {"audio": 1}
+        logging.info("Qwen3-Omni model detected, defaulting limit_mm_per_prompt to audio=1")
+
     # Deprecated env args backwards compatibility
     if args.get("kv_cache_dtype") == "fp8_e5m2":
         args["kv_cache_dtype"] = "fp8"
@@ -135,5 +141,5 @@ def get_engine_args():
     # if "gemma-2" in args.get("model", "").lower():
     #     os.environ["VLLM_ATTENTION_BACKEND"] = "FLASHINFER"
     #     logging.info("Using FLASHINFER for gemma-2 model.")
-        
+
     return AsyncEngineArgs(**args)

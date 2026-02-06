@@ -11,3 +11,4 @@ hf-transfer
 transformers>=4.57.0
 bitsandbytes>=0.45.0
 kernels
+qwen-omni-utils>=0.0.8

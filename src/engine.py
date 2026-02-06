@@ -333,8 +333,10 @@ class OpenAIvLLMEngine(vLLMEngine):
             processor = get_processor(self.engine_args.model)
             inputs, limit_mm = build_vllm_inputs(messages, processor)
         except Exception as e:
-            logging.error(f"Failed to build audio inputs: {e}")
-            yield create_error_response(f"Audio preprocessing failed: {e}").model_dump()
+            import traceback
+            err_msg = str(e) or f"{type(e).__name__}"
+            logging.error("Failed to build audio inputs: %s\n%s", err_msg, traceback.format_exc())
+            yield create_error_response(f"Audio preprocessing failed: {err_msg}").model_dump()
             return
 
         # Build sampling params from request

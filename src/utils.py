@@ -3,11 +3,11 @@ import logging
 from http import HTTPStatus
 from functools import wraps
 from time import time
-from vllm.entrypoints.openai.protocol import RequestResponseMetadata
+from vllm.entrypoints.openai.engine.protocol import RequestResponseMetadata
 
 try:
     from vllm.utils import random_uuid
-    from vllm.entrypoints.openai.protocol import ErrorResponse
+    from vllm.entrypoints.openai.engine.protocol import ErrorResponse
     from vllm import SamplingParams
 except ImportError:
     logging.warning("Error importing vllm, skipping related imports. This is ONLY expected when baking model into docker image from a machine without GPUs")

@@ -9,10 +9,13 @@ import time
 
 from vllm import AsyncLLMEngine
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest, ErrorResponse
-from vllm.entrypoints.openai.serving_models import BaseModelPath, LoRAModulePath, OpenAIServingModels
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.models.protocol import BaseModelPath, LoRAModulePath
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 
 
 from utils import DummyRequest, JobInput, BatchSize, create_error_response
@@ -202,14 +205,13 @@ class OpenAIvLLMEngine(vLLMEngine):
         return adapters
 
     async def _initialize_engines(self):
-        self.model_config = await self.llm.get_model_config()
+        self.model_config = self.llm.model_config
         self.base_model_paths = [
             BaseModelPath(name=self.engine_args.model, model_path=self.engine_args.model)
         ]
 
         self.serving_models = OpenAIServingModels(
             engine_client=self.llm,
-            model_config=self.model_config,
             base_model_paths=self.base_model_paths,
             lora_modules=self.lora_adapters,
         )
@@ -221,23 +223,21 @@ class OpenAIvLLMEngine(vLLMEngine):
             chat_template = self.tokenizer.tokenizer.chat_template
         
         self.chat_engine = OpenAIServingChat(
-            engine_client=self.llm, 
-            model_config=self.model_config,
+            engine_client=self.llm,
             models=self.serving_models,
             response_role=self.response_role,
             request_logger=None,
             chat_template=chat_template,
             chat_template_content_format="auto",
             # enable_reasoning=os.getenv('ENABLE_REASONING', 'false').lower() == 'true',
-            reasoning_parser= os.getenv('REASONING_PARSER', "") or None,
+            reasoning_parser=os.getenv('REASONING_PARSER', ""),
             # return_token_as_token_ids=False,
             enable_auto_tools=os.getenv('ENABLE_AUTO_TOOL_CHOICE', 'false').lower() == 'true',
             tool_parser=os.getenv('TOOL_CALL_PARSER', "") or None,
             enable_prompt_tokens_details=False
         )
         self.completion_engine = OpenAIServingCompletion(
-            engine_client=self.llm, 
-            model_config=self.model_config,
+            engine_client=self.llm,
             models=self.serving_models,
             request_logger=None,
             # return_token_as_token_ids=False,

@@ -5,11 +5,73 @@ Converts OpenAI-style messages with audio_url/audio_file content to the format
 expected by qwen_omni_utils and Qwen3OmniMoeProcessor, then builds vLLM inputs.
 """
 
+import base64
+import io
 import logging
 from pathlib import Path
 from functools import lru_cache
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+def decode_audio_data_uri(data_uri: str) -> "tuple[np.ndarray, float] | None":
+    """
+    Decode data:audio/*;base64,... to (audio_array, sample_rate).
+
+    qwen_omni_utils does not support base64 audio; vLLM expects (numpy_array, sample_rate).
+    Returns None if the input is not a valid base64 audio data URI or decoding fails.
+    """
+    if not isinstance(data_uri, str):
+        return None
+    if not data_uri.startswith("data:audio/") or ";base64," not in data_uri:
+        return None
+
+    try:
+        payload = data_uri.split(";base64,", 1)[1]
+        audio_bytes = base64.b64decode(payload)
+    except (IndexError, ValueError) as e:
+        logger.warning("Failed to decode base64 audio data URI: %s", e)
+        return None
+
+    try:
+        import librosa
+        import numpy as np
+
+        audio_array, sample_rate = librosa.load(io.BytesIO(audio_bytes), sr=None)
+        return (np.asarray(audio_array, dtype=np.float32), float(sample_rate))
+    except Exception as e:
+        logger.warning("Failed to load audio from base64 (ensure librosa/audioread available): %s", e)
+        return None
+
+
+def _convert_audios_for_vllm(audios):
+    """
+    Convert audios from process_mm_info to vLLM-compatible format.
+
+    Decodes any base64 data URIs to (numpy_array, sample_rate) tuples.
+    qwen_omni_utils does not support base64 audio; vLLM expects URLs or numpy tuples.
+    """
+    if audios is None:
+        return None
+
+    def convert_one(item):
+        if isinstance(item, str) and item.startswith("data:audio/") and ";base64," in item:
+            decoded = decode_audio_data_uri(item)
+            if decoded is not None:
+                return decoded
+            # Decode failed; keep original (may fail downstream, but preserves behavior)
+        return item
+
+    if isinstance(audios, list):
+        converted = [convert_one(a) for a in audios]
+    else:
+        converted = convert_one(audios)
+
+    return converted
 
 
 def has_audio_content(messages):
@@ -110,6 +172,9 @@ def build_vllm_inputs(messages, processor):
         qwen_messages,
         use_audio_in_video=False,
     )
+
+    # Decode base64 data URIs to (numpy_array, sample_rate); qwen_omni_utils does not support them
+    audios = _convert_audios_for_vllm(audios)
 
     inputs = {
         "prompt": text,

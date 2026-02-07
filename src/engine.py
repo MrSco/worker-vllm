@@ -334,7 +334,8 @@ class OpenAIvLLMEngine(vLLMEngine):
             inputs, limit_mm = build_vllm_inputs(messages, processor)
         except Exception as e:
             import traceback
-            err_msg = str(e) or f"{type(e).__name__}"
+            err_detail = (str(e) or "").strip()
+            err_msg = f"{type(e).__name__}: {err_detail}" if err_detail else type(e).__name__
             logging.error("Failed to build audio inputs: %s\n%s", err_msg, traceback.format_exc())
             yield create_error_response(f"Audio preprocessing failed: {err_msg}").model_dump()
             return

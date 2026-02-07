@@ -7,3 +7,4 @@ vllm-base/vllm-*
 .DS_Store
 request_openai_format.json
 response.json
+request_openai_format_base64.json

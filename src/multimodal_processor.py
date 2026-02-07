@@ -48,19 +48,30 @@ def decode_audio_data_uri(data_uri: str) -> "tuple[np.ndarray, float] | None":
         return None
 
 
+def _extract_audio_url(item):
+    """Extract data URI or URL from various process_mm_info return formats."""
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        return item.get("url") or item.get("audio") or item.get("data")
+    return None
+
+
 def _convert_audios_for_vllm(audios):
     """
     Convert audios from process_mm_info to vLLM-compatible format.
 
     Decodes any base64 data URIs to (numpy_array, sample_rate) tuples.
     qwen_omni_utils does not support base64 audio; vLLM expects URLs or numpy tuples.
+    Handles both bare strings and dict returns from process_mm_info.
     """
     if audios is None:
         return None
 
     def convert_one(item):
-        if isinstance(item, str) and item.startswith("data:audio/") and ";base64," in item:
-            decoded = decode_audio_data_uri(item)
+        url = _extract_audio_url(item)
+        if url and isinstance(url, str) and url.startswith("data:audio/") and ";base64," in url:
+            decoded = decode_audio_data_uri(url)
             if decoded is not None:
                 return decoded
             # Decode failed; keep original (may fail downstream, but preserves behavior)
@@ -176,6 +187,17 @@ def build_vllm_inputs(messages, processor):
     # Decode base64 data URIs to (numpy_array, sample_rate); qwen_omni_utils does not support them
     audios = _convert_audios_for_vllm(audios)
 
+    # Diagnostic logging (can remove after verification)
+    if audios is not None:
+        if isinstance(audios, list):
+            logger.info(
+                "build_vllm_inputs: audios type=list len=%d, first_item_type=%s",
+                len(audios),
+                type(audios[0]).__name__ if audios else "N/A",
+            )
+        else:
+            logger.info("build_vllm_inputs: audios type=%s", type(audios).__name__)
+
     inputs = {
         "prompt": text,
         "multi_modal_data": {},
@@ -184,8 +206,13 @@ def build_vllm_inputs(messages, processor):
     limit_mm_per_prompt = {}
 
     if audios is not None:
-        inputs["multi_modal_data"]["audio"] = audios
-        n_audio = len(audios) if isinstance(audios, list) else 1
+        # vLLM Qwen3-Omni: single audio = (array, sr), multiple = [(array, sr), ...]
+        if isinstance(audios, list) and len(audios) == 1:
+            inputs["multi_modal_data"]["audio"] = audios[0]
+            n_audio = 1
+        else:
+            inputs["multi_modal_data"]["audio"] = audios
+            n_audio = len(audios) if isinstance(audios, list) else 1
         limit_mm_per_prompt["audio"] = n_audio
 
     return inputs, limit_mm_per_prompt

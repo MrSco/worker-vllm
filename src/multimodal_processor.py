@@ -6,24 +6,25 @@ expected by qwen_omni_utils and Qwen3OmniMoeProcessor, then builds vLLM inputs.
 """
 
 import base64
-import io
 import logging
+import tempfile
 from pathlib import Path
 from functools import lru_cache
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    import numpy as np
 
 logger = logging.getLogger(__name__)
 
 
-def decode_audio_data_uri(data_uri: str) -> "tuple[np.ndarray, float] | None":
-    """
-    Decode data:audio/*;base64,... to (audio_array, sample_rate).
+# Map MIME subtype to file extension (e.g. mpeg -> .mp3, wav -> .wav)
+_AUDIO_MIME_TO_EXT = {"mpeg": ".mp3", "mp3": ".mp3", "wav": ".wav", "ogg": ".ogg", "flac": ".flac", "m4a": ".m4a"}
 
-    qwen_omni_utils does not support base64 audio; vLLM expects (numpy_array, sample_rate).
-    Returns None if the input is not a valid base64 audio data URI or decoding fails.
+
+def _base64_data_uri_to_file_url(data_uri: str) -> str | None:
+    """
+    Decode data:audio/*;base64,... and write raw bytes to a temp file.
+
+    Preserves original format (MP3 stays MP3, WAV stays WAV). vLLM's engine
+    runs in a separate process; file:// URLs are more reliable than passing
+    in-memory data across process boundaries.
     """
     if not isinstance(data_uri, str):
         return None
@@ -31,20 +32,22 @@ def decode_audio_data_uri(data_uri: str) -> "tuple[np.ndarray, float] | None":
         return None
 
     try:
-        payload = data_uri.split(";base64,", 1)[1]
+        mime_part, payload = data_uri.split(";base64,", 1)
+        # mime_part is "data:audio/mpeg" or "data:audio/wav" etc.
+        subtype = mime_part.split("/")[-1].strip().lower()
+        ext = _AUDIO_MIME_TO_EXT.get(subtype, f".{subtype}" if subtype else ".bin")
         audio_bytes = base64.b64decode(payload)
     except (IndexError, ValueError) as e:
         logger.warning("Failed to decode base64 audio data URI: %s", e)
         return None
 
     try:
-        import librosa
-        import numpy as np
-
-        audio_array, sample_rate = librosa.load(io.BytesIO(audio_bytes), sr=None)
-        return (np.asarray(audio_array, dtype=np.float32), float(sample_rate))
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
+            f.write(audio_bytes)
+            path = f.name
+        return f"file://{path}"
     except Exception as e:
-        logger.warning("Failed to load audio from base64 (ensure librosa/audioread available): %s", e)
+        logger.warning("Failed to write audio to temp file: %s", e)
         return None
 
 
@@ -61,8 +64,8 @@ def _convert_audios_for_vllm(audios):
     """
     Convert audios from process_mm_info to vLLM-compatible format.
 
-    Decodes any base64 data URIs to (numpy_array, sample_rate) tuples.
-    qwen_omni_utils does not support base64 audio; vLLM expects URLs or numpy tuples.
+    Decodes base64 data URIs and writes raw bytes to temp files (MP3 stays MP3, etc.).
+    qwen_omni_utils does not support base64 audio; vLLM expects file:// URLs.
     Handles both bare strings and dict returns from process_mm_info.
     """
     if audios is None:
@@ -71,10 +74,10 @@ def _convert_audios_for_vllm(audios):
     def convert_one(item):
         url = _extract_audio_url(item)
         if url and isinstance(url, str) and url.startswith("data:audio/") and ";base64," in url:
-            decoded = decode_audio_data_uri(url)
-            if decoded is not None:
-                return decoded
-            # Decode failed; keep original (may fail downstream, but preserves behavior)
+            file_url = _base64_data_uri_to_file_url(url)
+            if file_url is not None:
+                return file_url
+            # Decode or file write failed; keep original (may fail downstream)
         return item
 
     if isinstance(audios, list):
@@ -184,7 +187,7 @@ def build_vllm_inputs(messages, processor):
         use_audio_in_video=False,
     )
 
-    # Decode base64 data URIs to (numpy_array, sample_rate); qwen_omni_utils does not support them
+    # Decode base64 data URIs to file:// URLs; qwen_omni_utils does not support them
     audios = _convert_audios_for_vllm(audios)
 
     # Diagnostic logging (can remove after verification)

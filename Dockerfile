@@ -42,5 +42,6 @@ RUN --mount=type=secret,id=HF_TOKEN,required=false \
     python3 /src/download_model.py; \
     fi
 
-# Start the handler
+# Override vllm entrypoint and start the handler
+ENTRYPOINT []
 CMD ["python3", "/src/handler.py"]

@@ -9,7 +9,7 @@ RUN apt-get update -y \
 COPY builder/requirements.txt /requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade -r /requirements.txt && \
-    pip install --system "vllm[audio]==0.15.1"
+    pip install "vllm[audio]==0.15.1"
 
 # Setup for Option 2: Building the Image with the Model included
 ARG MODEL_NAME=""

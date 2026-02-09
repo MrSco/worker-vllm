@@ -1,8 +1,13 @@
 FROM vllm/vllm-openai:v0.15.1
 
-# Remove CUDA compat library override that breaks Blackwell GPUs
+# Remove ALL CUDA compat library overrides that break Blackwell GPUs
 # See: https://github.com/vllm-project/vllm/pull/33992
-RUN rm -f /etc/ld.so.conf.d/00-cuda-compat.conf && ldconfig
+RUN rm -f /etc/ld.so.conf.d/*cuda-compat* && \
+    ldconfig && \
+    echo "=== Remaining ldconfig confs ===" && \
+    ls -la /etc/ld.so.conf.d/ && \
+    echo "=== libcuda.so resolution ===" && \
+    ldconfig -p | grep libcuda || true
 
 # Install ffmpeg for audio processing (Qwen3-Omni)
 RUN apt-get update -y \

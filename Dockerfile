@@ -1,10 +1,9 @@
-FROM nvidia/cuda:12.9.0-base-ubuntu22.04 
+FROM nvidia/cuda:12.8.0-base-ubuntu22.04 
 
 RUN apt-get update -y \
     && apt-get install -y python3-pip ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-RUN ldconfig /usr/local/cuda-12.9/compat/
 
 # Install Python dependencies
 COPY builder/requirements.txt /requirements.txt
@@ -12,9 +11,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install --upgrade pip && \
     python3 -m pip install --upgrade -r /requirements.txt
 
-# Install vLLM with audio support (librosa, etc.) - cu129 variant for Blackwell (RTX PRO 6000) compatibility
+# Install vLLM with audio support (librosa, etc.) - cu128 variant for Blackwell (RTX PRO 6000) compatibility
 RUN python3 -m pip install "vllm[audio]==0.15.1" \
-    --extra-index-url https://download.pytorch.org/whl/cu129
+    --extra-index-url https://download.pytorch.org/whl/cu128
 
 # Setup for Option 2: Building the Image with the Model included
 ARG MODEL_NAME=""
@@ -48,4 +47,5 @@ RUN --mount=type=secret,id=HF_TOKEN,required=false \
     fi
 
 # Start the handler
-CMD ["python3", "/src/handler.py"]
+# Only enable if needed: docker run --env USE_CUDA_COMPAT=1 ...
+CMD if [ "$USE_CUDA_COMPAT" = "1" ]; then ldconfig /usr/local/cuda-12.8/compat/; fi && python3 /src/handler.py

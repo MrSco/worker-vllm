@@ -1,19 +1,15 @@
-FROM nvidia/cuda:12.8.0-base-ubuntu22.04 
+FROM vllm/vllm-openai:v0.15.1
 
+# Install ffmpeg for audio processing (Qwen3-Omni)
 RUN apt-get update -y \
-    && apt-get install -y python3-pip ffmpeg \
+    && apt-get install -y ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-
-# Install Python dependencies
+# Install vLLM audio extras and additional Python dependencies
 COPY builder/requirements.txt /requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install --upgrade pip && \
-    python3 -m pip install --upgrade -r /requirements.txt
-
-# Install vLLM with audio support (librosa, etc.) - cu128 variant for Blackwell (RTX PRO 6000) compatibility
-RUN python3 -m pip install "vllm[audio]==0.15.1" \
-    --extra-index-url https://download.pytorch.org/whl/cu128
+    pip install --upgrade -r /requirements.txt && \
+    pip install --system "vllm[audio]==0.15.1"
 
 # Setup for Option 2: Building the Image with the Model included
 ARG MODEL_NAME=""
@@ -47,5 +43,4 @@ RUN --mount=type=secret,id=HF_TOKEN,required=false \
     fi
 
 # Start the handler
-# Only enable if needed: docker run --env USE_CUDA_COMPAT=1 ...
-CMD if [ "$USE_CUDA_COMPAT" = "1" ]; then ldconfig /usr/local/cuda-12.8/compat/; fi && python3 /src/handler.py
+CMD ["python3", "/src/handler.py"]

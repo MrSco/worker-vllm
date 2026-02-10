@@ -1,4 +1,23 @@
 import os
+import time
+import torch
+
+# Wait for CUDA to become available (Blackwell GPUs may need a moment after container start)
+for _attempt in range(10):
+    try:
+        torch.cuda.init()
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            print(f"CUDA ready on attempt {_attempt + 1}: {torch.cuda.get_device_name(0)}", flush=True)
+            break
+    except Exception as e:
+        print(f"CUDA init attempt {_attempt + 1} failed: {e}", flush=True)
+        torch.cuda._initialized = False
+        time.sleep(3)
+else:
+    import sys
+    print("FATAL: CUDA not available after 10 attempts. Exiting.", flush=True)
+    sys.exit(1)
+
 import runpod
 from utils import JobInput
 from engine import vLLMEngine, OpenAIvLLMEngine

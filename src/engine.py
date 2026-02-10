@@ -360,20 +360,20 @@ class OpenAIvLLMEngine(vLLMEngine):
         if openai_input.get("seed") is not None:
             sp_kwargs["seed"] = openai_input["seed"]
 
-        # Handle response_format -> guided decoding
+        # Handle response_format -> structured outputs
         response_format = openai_input.get("response_format")
         if response_format:
             try:
-                from vllm.sampling_params import GuidedDecodingParams
+                from vllm.sampling_params import StructuredOutputsParams
                 rf_type = response_format.get("type")
                 if rf_type == "json_schema":
                     schema = response_format.get("json_schema", {}).get("schema")
                     if schema:
-                        sp_kwargs["guided_decoding"] = GuidedDecodingParams(json=schema)
+                        sp_kwargs["structured_outputs"] = StructuredOutputsParams(json=schema)
                 elif rf_type == "json_object":
-                    sp_kwargs["guided_decoding"] = GuidedDecodingParams(json_object=True)
+                    sp_kwargs["structured_outputs"] = StructuredOutputsParams(json={})
             except ImportError:
-                logging.warning("GuidedDecodingParams not available, response_format ignored")
+                logging.warning("StructuredOutputsParams not available, response_format ignored")
 
         sampling_params = SamplingParams(**sp_kwargs)
         request_id = random_uuid()

@@ -5,87 +5,11 @@ Converts OpenAI-style messages with audio_url/audio_file content to the format
 expected by qwen_omni_utils and Qwen3OmniMoeProcessor, then builds vLLM inputs.
 """
 
-import base64
 import logging
-import tempfile
 from pathlib import Path
 from functools import lru_cache
 
 logger = logging.getLogger(__name__)
-
-
-# Map MIME subtype to file extension (e.g. mpeg -> .mp3, wav -> .wav)
-_AUDIO_MIME_TO_EXT = {"mpeg": ".mp3", "mp3": ".mp3", "wav": ".wav", "ogg": ".ogg", "flac": ".flac", "m4a": ".m4a"}
-
-
-def _base64_data_uri_to_file_url(data_uri: str) -> str | None:
-    """
-    Decode data:audio/*;base64,... and write raw bytes to a temp file.
-
-    Preserves original format (MP3 stays MP3, WAV stays WAV). vLLM's engine
-    runs in a separate process; file:// URLs are more reliable than passing
-    in-memory data across process boundaries.
-    """
-    if not isinstance(data_uri, str):
-        return None
-    if not data_uri.startswith("data:audio/") or ";base64," not in data_uri:
-        return None
-
-    try:
-        mime_part, payload = data_uri.split(";base64,", 1)
-        # mime_part is "data:audio/mpeg" or "data:audio/wav" etc.
-        subtype = mime_part.split("/")[-1].strip().lower()
-        ext = _AUDIO_MIME_TO_EXT.get(subtype, f".{subtype}" if subtype else ".bin")
-        audio_bytes = base64.b64decode(payload)
-    except (IndexError, ValueError) as e:
-        logger.warning("Failed to decode base64 audio data URI: %s", e)
-        return None
-
-    try:
-        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
-            f.write(audio_bytes)
-            path = f.name
-        return f"file://{path}"
-    except Exception as e:
-        logger.warning("Failed to write audio to temp file: %s", e)
-        return None
-
-
-def _extract_audio_url(item):
-    """Extract data URI or URL from various process_mm_info return formats."""
-    if isinstance(item, str):
-        return item
-    if isinstance(item, dict):
-        return item.get("url") or item.get("audio") or item.get("data")
-    return None
-
-
-def _convert_audios_for_vllm(audios):
-    """
-    Convert audios from process_mm_info to vLLM-compatible format.
-
-    Decodes base64 data URIs and writes raw bytes to temp files (MP3 stays MP3, etc.).
-    qwen_omni_utils does not support base64 audio; vLLM expects file:// URLs.
-    Handles both bare strings and dict returns from process_mm_info.
-    """
-    if audios is None:
-        return None
-
-    def convert_one(item):
-        url = _extract_audio_url(item)
-        if url and isinstance(url, str) and url.startswith("data:audio/") and ";base64," in url:
-            file_url = _base64_data_uri_to_file_url(url)
-            if file_url is not None:
-                return file_url
-            # Decode or file write failed; keep original (may fail downstream)
-        return item
-
-    if isinstance(audios, list):
-        converted = [convert_one(a) for a in audios]
-    else:
-        converted = convert_one(audios)
-
-    return converted
 
 
 def has_audio_content(messages):
@@ -98,6 +22,7 @@ def has_audio_content(messages):
             continue
         for part in content:
             if part.get("type") in ("audio_url", "audio_file", "audio"):
+                logger.info("Audio content detected in messages (type=%s, role=%s)", part.get("type"), msg.get("role"))
                 return True
     return False
 
@@ -112,13 +37,18 @@ def normalize_messages_to_qwen_format(messages):
     - type: "audio" (already qwen format) stays as-is
     - image/video types are skipped (text+audio only)
     """
+    logger.info("Normalizing %d message(s) to Qwen format...", len(messages))
     normalized = []
+    audio_count = 0
+    text_count = 0
+
     for msg in messages:
         role = msg.get("role", "")
         content = msg.get("content", "")
 
         if isinstance(content, str):
             normalized.append({"role": role, "content": content})
+            text_count += 1
             continue
 
         if not isinstance(content, list):
@@ -130,10 +60,13 @@ def normalize_messages_to_qwen_format(messages):
             ptype = part.get("type", "")
             if ptype == "text":
                 new_parts.append({"type": "text", "text": part.get("text", "")})
+                text_count += 1
             elif ptype == "audio_url":
                 url = part.get("audio_url", {}).get("url", "")
                 if url:
+                    logger.info("  Mapping audio_url -> audio (url=%s...)", url[:80])
                     new_parts.append({"type": "audio", "audio": url})
+                    audio_count += 1
             elif ptype == "audio_file":
                 path = part.get("audio_file", {}).get("path", "")
                 if path:
@@ -142,9 +75,12 @@ def normalize_messages_to_qwen_format(messages):
                     else:
                         p = Path(path).resolve()
                         audio_ref = f"file:///{p.as_posix()}"
+                    logger.info("  Mapping audio_file -> audio (ref=%s...)", audio_ref[:80])
                     new_parts.append({"type": "audio", "audio": audio_ref})
+                    audio_count += 1
             elif ptype == "audio":
                 new_parts.append(part)
+                audio_count += 1
             # Skip image/video - text+audio only
 
         if new_parts:
@@ -152,6 +88,7 @@ def normalize_messages_to_qwen_format(messages):
         else:
             normalized.append({"role": role, "content": content})
 
+    logger.info("Normalization complete — %d text part(s), %d audio part(s)", text_count, audio_count)
     return normalized
 
 
@@ -174,32 +111,36 @@ def build_vllm_inputs(messages, processor):
     """
     from qwen_omni_utils import process_mm_info
 
+    logger.info("Building vLLM inputs from %d message(s)...", len(messages))
+
     qwen_messages = normalize_messages_to_qwen_format(messages)
 
+    logger.info("Applying chat template via processor...")
     text = processor.apply_chat_template(
         qwen_messages,
         tokenize=False,
         add_generation_prompt=True,
     )
+    logger.info("Chat template applied — prompt length: %d chars", len(text))
 
+    logger.info("Extracting multimodal info (audio/image/video)...")
     audios, images, videos = process_mm_info(
         qwen_messages,
         use_audio_in_video=False,
     )
 
-    # Decode base64 data URIs to file:// URLs; qwen_omni_utils does not support them
-    audios = _convert_audios_for_vllm(audios)
-
-    # Diagnostic logging (can remove after verification)
+    # Diagnostic logging
     if audios is not None:
         if isinstance(audios, list):
             logger.info(
-                "build_vllm_inputs: audios type=list len=%d, first_item_type=%s",
+                "Extracted audios: type=list, count=%d, first_item_type=%s",
                 len(audios),
                 type(audios[0]).__name__ if audios else "N/A",
             )
         else:
-            logger.info("build_vllm_inputs: audios type=%s", type(audios).__name__)
+            logger.info("Extracted audios: type=%s", type(audios).__name__)
+    else:
+        logger.info("No audio data extracted from messages")
 
     inputs = {
         "prompt": text,
@@ -217,5 +158,9 @@ def build_vllm_inputs(messages, processor):
             inputs["multi_modal_data"]["audio"] = audios
             n_audio = len(audios) if isinstance(audios, list) else 1
         limit_mm_per_prompt["audio"] = n_audio
+        logger.info("Multimodal data attached — %d audio item(s)", n_audio)
+
+    logger.info("vLLM inputs ready (prompt=%d chars, mm_keys=%s, limits=%s)",
+                 len(text), list(inputs["multi_modal_data"].keys()), limit_mm_per_prompt)
 
     return inputs, limit_mm_per_prompt

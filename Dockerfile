@@ -1,13 +1,6 @@
-FROM vllm/vllm-openai:v0.15.1
+FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04 
 
-# Remove ALL CUDA compat library overrides that break Blackwell GPUs
-# See: https://github.com/vllm-project/vllm/pull/33992
-RUN rm -f /etc/ld.so.conf.d/*cuda-compat* && \
-    ldconfig && \
-    echo "=== Remaining ldconfig confs ===" && \
-    ls -la /etc/ld.so.conf.d/ && \
-    echo "=== libcuda.so resolution ===" && \
-    ldconfig -p | grep libcuda || true
+RUN ldconfig /usr/local/cuda-12.8/compat/
 
 # Install ffmpeg for audio processing (Qwen3-Omni)
 RUN apt-get update -y \
@@ -40,9 +33,6 @@ ENV MODEL_NAME=$MODEL_NAME \
     HF_HUB_ENABLE_HF_TRANSFER=0 
 
 ENV PYTHONPATH="/:/vllm-workspace"
-# Lazy loading of CUDA modules to avoid breaking Blackwell GPUs
-ENV CUDA_MODULE_LOADING=LAZY
-
 
 COPY src /src
 RUN --mount=type=secret,id=HF_TOKEN,required=false \
@@ -53,6 +43,4 @@ RUN --mount=type=secret,id=HF_TOKEN,required=false \
     python3 /src/download_model.py; \
     fi
 
-# Override vllm entrypoint and start the handler
-ENTRYPOINT []
 CMD ["python3", "/src/handler.py"]

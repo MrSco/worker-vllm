@@ -2,16 +2,19 @@ FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
 
 RUN ldconfig /usr/local/cuda-12.8/compat/
 
-# Install ffmpeg for audio processing (Qwen3-Omni)
+# Install Python, pip, ffmpeg, and build essentials
 RUN apt-get update -y \
-    && apt-get install -y ffmpeg \
+    && apt-get install -y --no-install-recommends \
+        python3 python3-pip python3-dev \
+        ffmpeg git \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
     && rm -rf /var/lib/apt/lists/*
 
 # Install vLLM audio extras and additional Python dependencies
 COPY builder/requirements.txt /requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade -r /requirements.txt && \
-    pip install "vllm[audio]==0.15.1"
+    pip install --no-cache-dir --upgrade -r /requirements.txt && \
+    pip install --no-cache-dir "vllm[audio]==0.15.1"
 
 # Setup for Option 2: Building the Image with the Model included
 ARG MODEL_NAME=""

@@ -40,6 +40,7 @@ ENV MODEL_NAME=$MODEL_NAME \
     HF_HUB_ENABLE_HF_TRANSFER=0 
 
 ENV PYTHONPATH="/:/vllm-workspace"
+# Lazy loading of CUDA modules to avoid breaking Blackwell GPUs
 ENV CUDA_MODULE_LOADING=LAZY
 
 
